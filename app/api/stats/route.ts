@@ -27,7 +27,7 @@ export async function GET(request: Request) {
   const dateFilter = `created_at=gte.${fromDate}T00:00:00Z&created_at=lte.${toDate}T23:59:59Z`;
 
   const [calls, smsLogs, ahCalls] = await Promise.all([
-    sb(`calls?select=id,agent_id,agent_type,status,follow_up_count,duration_seconds,created_at,ai_summary,phone,ghl_contact_id,call_id&${dateFilter}&limit=2000`),
+    sb(`calls?select=id,agent_id,agent_type,status,follow_up_count,duration_seconds,created_at,ai_summary,phone,ghl_contact_id,call_id&${dateFilter}&limit=5000&order=created_at.desc`),
     sb("sms_logs?select=id,phone,status,follow_up_count,sent_at,created_at"),
     sb("after_hours_calls?select=id,phone,status,created_at"),
   ]);
