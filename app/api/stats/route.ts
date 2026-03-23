@@ -18,9 +18,16 @@ async function sb(path: string) {
   return r.json();
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const fromDate = searchParams.get("from") || "2025-01-01";
+  const toDate = searchParams.get("to") || new Date().toISOString().split("T")[0];
+
+  // Date filter for calls
+  const dateFilter = `created_at=gte.${fromDate}T00:00:00Z&created_at=lte.${toDate}T23:59:59Z`;
+
   const [calls, smsLogs, ahCalls] = await Promise.all([
-    sb("calls?select=id,agent_id,status,follow_up_count,duration_seconds,created_at,ai_summary,phone,ghl_contact_id"),
+    sb(`calls?select=id,agent_id,agent_type,status,follow_up_count,duration_seconds,created_at,ai_summary,phone,ghl_contact_id,call_id&${dateFilter}&limit=2000`),
     sb("sms_logs?select=id,phone,status,follow_up_count,sent_at,created_at"),
     sb("after_hours_calls?select=id,phone,status,created_at"),
   ]);
@@ -35,6 +42,10 @@ export async function GET() {
   const avgAttempts = calls.length
     ? (calls.reduce((s: number, c: any) => s + (c.follow_up_count || 0), 0) / calls.length).toFixed(1)
     : "0";
+
+  // Total talk time
+  const totalTalkSeconds = calls.reduce((s: number, c: any) => s + (c.duration_seconds || 0), 0);
+  const totalTalkMinutes = Math.round(totalTalkSeconds / 60);
 
   // ── Status breakdown ──────────────────────────────────────────────────────
   const statusMap: Record<string, number> = {};
@@ -84,6 +95,22 @@ export async function GET() {
     else              fupBuckets["11+"]++;
   }
 
+  // ── Calls by month ────────────────────────────────────────────────────────
+  const monthMap: Record<string, { count: number; booked: number }> = {};
+  for (const c of calls) {
+    if (!c.created_at) continue;
+    const month = c.created_at.slice(0, 7); // "2026-03"
+    if (!monthMap[month]) monthMap[month] = { count: 0, booked: 0 };
+    monthMap[month].count++;
+    if (c.status === "booked") monthMap[month].booked++;
+  }
+  const callsByMonth = Object.entries(monthMap)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([month, stats]) => ({ month, ...stats }));
+
+  // ── Legacy (pre-2026) count ──────────────────────────────────────────────
+  const legacyCount = calls.filter((c: any) => c.agent_type === "legacy_outbound").length;
+
   // ── Recent calls ─────────────────────────────────────────────────────────
   const recent = [...calls]
     .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
@@ -91,6 +118,7 @@ export async function GET() {
     .map((c: any) => ({
       phone:     c.phone,
       agent:     AGENT_LABELS[c.agent_id] || c.agent_id,
+      agentType: c.agent_type,
       status:    c.status,
       attempts:  c.follow_up_count,
       summary:   c.ai_summary?.slice(0, 80) || "",
@@ -98,11 +126,14 @@ export async function GET() {
     }));
 
   return NextResponse.json({
-    kpis: { totalLeads, totalCalls, booked, dnc, totalSms, avgAttempts, ahCalls: ahCalls.length },
+    kpis: { totalLeads, totalCalls, booked, dnc, totalSms, avgAttempts, ahCalls: ahCalls.length, totalTalkMinutes },
     statusBreakdown: statusMap,
     agents,
     fupDistribution: fupBuckets,
     recentCalls: recent,
     smsTotal: totalSms,
+    callsByMonth,
+    legacyCount,
+    dateRange: { from: fromDate, to: toDate },
   });
 }

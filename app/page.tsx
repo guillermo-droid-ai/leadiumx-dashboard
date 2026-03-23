@@ -7,13 +7,23 @@ interface AgentStat {
   id: string; label: string; calls: number; answered: number;
   booked: number; dnc: number; voicemail: number; noAnswer: number; sms: number;
 }
+interface MonthStat { month: string; count: number; booked: number; }
 interface Stats {
-  kpis: { totalLeads: number; totalCalls: number; booked: number; dnc: number; totalSms: number; avgAttempts: string; ahCalls: number };
+  kpis: {
+    totalLeads: number; totalCalls: number; booked: number; dnc: number;
+    totalSms: number; avgAttempts: string; ahCalls: number; totalTalkMinutes: number;
+  };
   statusBreakdown: Record<string, number>;
   agents: AgentStat[];
   fupDistribution: Record<string, number>;
-  recentCalls: { phone: string; agent: string; status: string; attempts: number; summary: string; createdAt: string }[];
+  recentCalls: {
+    phone: string; agent: string; agentType: string; status: string;
+    attempts: number; summary: string; createdAt: string;
+  }[];
   smsTotal: number;
+  callsByMonth: MonthStat[];
+  legacyCount: number;
+  dateRange: { from: string; to: string };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -36,8 +46,25 @@ const STATUS_LABEL: Record<string, string> = {
   do_not_call:    "DNC 🚫",
   location_sold:  "Property Sold",
   never_selling:  "Never Selling",
-  calling:        "Calling...",
+  calling:        "Connected",
 };
+
+function formatTalkTime(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h === 0) return `${m}m`;
+  return `${h}h ${m}m`;
+}
+
+function defaultDateRange() {
+  const to = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - 90);
+  return {
+    from: from.toISOString().split("T")[0],
+    to:   to.toISOString().split("T")[0],
+  };
+}
 
 function KpiCard({ label, value, sub, color }: { label: string; value: string | number; sub?: string; color?: string }) {
   return (
@@ -67,25 +94,77 @@ function BarRow({ label, value, max, color }: { label: string; value: number; ma
   );
 }
 
+function CallsBarChart({ data }: { data: MonthStat[] }) {
+  if (!data || data.length === 0) {
+    return <p className="text-gray-500 text-center py-8">No monthly data yet</p>;
+  }
+  const maxCount = Math.max(...data.map(d => d.count), 1);
+  const chartH = 120;
+  const barW = Math.min(40, Math.floor(480 / data.length) - 4);
+  const gap = 4;
+  const totalW = data.length * (barW + gap);
+
+  return (
+    <div className="overflow-x-auto">
+      <svg width={Math.max(totalW, 400)} height={chartH + 40} className="block mx-auto">
+        {data.map((d, i) => {
+          const barH = Math.max(4, Math.round((d.count / maxCount) * chartH));
+          const bookedH = d.count > 0 ? Math.round((d.booked / d.count) * barH) : 0;
+          const x = i * (barW + gap);
+          const label = d.month.slice(5); // "03" from "2026-03"
+          const year  = d.month.slice(2, 4); // "26"
+          return (
+            <g key={d.month}>
+              {/* base bar */}
+              <rect x={x} y={chartH - barH} width={barW} height={barH}
+                fill="#3b82f6" rx={3} opacity={0.8} />
+              {/* booked overlay */}
+              {bookedH > 0 && (
+                <rect x={x} y={chartH - bookedH} width={barW} height={bookedH}
+                  fill="#10b981" rx={3} />
+              )}
+              {/* count label */}
+              <text x={x + barW / 2} y={chartH - barH - 4}
+                textAnchor="middle" fontSize={9} fill="#9ca3af">{d.count}</text>
+              {/* month label */}
+              <text x={x + barW / 2} y={chartH + 14}
+                textAnchor="middle" fontSize={9} fill="#6b7280">{label}/{year}</text>
+            </g>
+          );
+        })}
+        {/* Legend */}
+        <g transform={`translate(0, ${chartH + 28})`}>
+          <rect x={0} y={0} width={10} height={10} fill="#3b82f6" rx={2} />
+          <text x={14} y={9} fontSize={9} fill="#9ca3af">Calls</text>
+          <rect x={50} y={0} width={10} height={10} fill="#10b981" rx={2} />
+          <text x={64} y={9} fontSize={9} fill="#9ca3af">Booked</text>
+        </g>
+      </svg>
+    </div>
+  );
+}
+
 // ── Main Dashboard ────────────────────────────────────────────────────────
 export default function Dashboard() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+  const [dateRange, setDateRange] = useState(defaultDateRange());
 
   const fetchStats = useCallback(async () => {
     try {
-      const r = await fetch("/api/stats");
+      const params = new URLSearchParams({ from: dateRange.from, to: dateRange.to });
+      const r = await fetch(`/api/stats?${params}`);
       const d = await r.json();
       setStats(d);
       setLastRefresh(new Date());
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
-  }, []);
+  }, [dateRange]);
 
   useEffect(() => {
     fetchStats();
-    const interval = setInterval(fetchStats, 60000); // refresh every 60s
+    const interval = setInterval(fetchStats, 60000);
     return () => clearInterval(interval);
   }, [fetchStats]);
 
@@ -97,13 +176,13 @@ export default function Dashboard() {
 
   if (!stats) return <div className="flex items-center justify-center min-h-screen text-red-400">Error loading data</div>;
 
-  const { kpis, statusBreakdown, agents, fupDistribution, recentCalls } = stats;
+  const { kpis, statusBreakdown, agents, fupDistribution, recentCalls, callsByMonth, legacyCount } = stats;
   const totalStatuses = Object.values(statusBreakdown).reduce((a, b) => a + b, 0);
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-8">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white">LeadiumX — Operations Dashboard</h1>
           <p className="text-gray-400 text-sm mt-1">AI Agent Performance & Lead Tracking</p>
@@ -116,8 +195,47 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Date Range Filter */}
+      <div className="bg-gray-800 rounded-xl p-4 flex flex-wrap items-center gap-4">
+        <span className="text-sm text-gray-300 font-medium">📅 Date Range:</span>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-gray-400">From</label>
+          <input
+            type="date"
+            value={dateRange.from}
+            onChange={e => setDateRange(r => ({ ...r, from: e.target.value }))}
+            className="bg-gray-700 text-white text-sm rounded-lg px-3 py-1.5 border border-gray-600 focus:outline-none focus:border-emerald-500"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-gray-400">To</label>
+          <input
+            type="date"
+            value={dateRange.to}
+            onChange={e => setDateRange(r => ({ ...r, to: e.target.value }))}
+            className="bg-gray-700 text-white text-sm rounded-lg px-3 py-1.5 border border-gray-600 focus:outline-none focus:border-emerald-500"
+          />
+        </div>
+        <div className="flex gap-2 ml-auto">
+          {[7,30,90,365].map(days => (
+            <button key={days} onClick={() => {
+              const to = new Date();
+              const from = new Date();
+              from.setDate(from.getDate() - days);
+              setDateRange({ from: from.toISOString().split("T")[0], to: to.toISOString().split("T")[0] });
+            }} className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300 transition-colors">
+              {days}d
+            </button>
+          ))}
+          <button onClick={() => setDateRange({ from: "2025-01-01", to: new Date().toISOString().split("T")[0] })}
+            className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300 transition-colors">
+            All
+          </button>
+        </div>
+      </div>
+
       {/* KPIs */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-8 gap-4">
         <KpiCard label="Total Leads" value={kpis.totalLeads} color="bg-gray-800" />
         <KpiCard label="Total Calls" value={kpis.totalCalls} color="bg-gray-800" />
         <KpiCard label="After Hours" value={kpis.ahCalls} color="bg-gray-800" />
@@ -125,6 +243,27 @@ export default function Dashboard() {
         <KpiCard label="DNC" value={kpis.dnc} color="bg-red-950" />
         <KpiCard label="SMS Sent" value={kpis.totalSms} color="bg-gray-800" />
         <KpiCard label="Avg Attempts" value={kpis.avgAttempts} sub="per lead" color="bg-gray-800" />
+        <KpiCard label="Total Talk Time" value={formatTalkTime(kpis.totalTalkMinutes)} sub="connected calls" color="bg-indigo-900" />
+      </div>
+
+      {/* Legacy Pre-2026 card (show if legacy calls exist) */}
+      {legacyCount > 0 && (
+        <div className="bg-gray-800 border border-gray-600 rounded-xl p-4 flex items-center gap-4">
+          <div className="text-2xl">📼</div>
+          <div>
+            <p className="text-sm font-semibold text-gray-200">Legacy (Pre-2026) Calls</p>
+            <p className="text-xs text-gray-400">
+              <span className="text-white font-bold text-lg">{legacyCount}</span> calls from legacy_outbound agents
+              (imported from Retell historical data)
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Calls by Month Chart */}
+      <div className="bg-gray-800 rounded-xl p-5">
+        <h2 className="text-lg font-semibold mb-4">Calls by Month</h2>
+        <CallsBarChart data={callsByMonth} />
       </div>
 
       {/* Agent Performance */}
@@ -242,7 +381,7 @@ export default function Dashboard() {
                     <td className="py-2 pr-4 text-center text-gray-300">{c.attempts ?? 0}</td>
                     <td className="py-2 pr-4 text-gray-400 text-xs max-w-xs truncate">{c.summary || "—"}</td>
                     <td className="py-2 text-gray-500 text-xs whitespace-nowrap">
-                      {new Date(c.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                      {new Date(c.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
                     </td>
                   </tr>
                 ))}
